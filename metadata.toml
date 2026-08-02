@@ -1,0 +1,27 @@
+[plugin]
+name        = "王者荣耀热点"
+version     = "1.0.0"
+author      = "Vway-yw"
+description = "王者荣耀热点/爆料/攻略查询，30分钟自动刷新保证时效"
+priority    = 50
+icon        = "https://avatars.githubusercontent.com/u/307078813?v=4"
+dependencies = []
+category    = "Entertainment"
+tags        = ["王者荣耀", "热点", "爆料", "攻略", "游戏"]
+repo        = "Vway-yw/loyan-wzry"
+docs_url    = "https://github.com/Vway-yw/loyan-wzry"
+min_framework = "0.1.0"
+
+[handler]
+entry       = "handle_wzry"
+
+[trigger]
+commands       = ["/王者热点", "/王者荣耀热点", "/王者资讯", "/王者爆料", "/王者荣耀爆料", "/王者更新", "/王者攻略", "/王者荣耀攻略"]
+chat_type      = ["private", "group"]
+permission     = "all"
+is_at_required = false
+
+[trigger.command_descriptions]
+"/王者热点"     = "🔥 查看王者荣耀最新热点 TOP10"
+"/王者爆料"     = "⚡ 查看王者荣耀版本更新/新皮肤爆料"
+"/王者攻略"     = "📖 查看攻略（可用 /王者攻略 <英雄名> 定向搜索）"
