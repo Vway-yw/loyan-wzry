@@ -1,4 +1,4 @@
-"""王者荣耀热点插件 — 热点列表 + 输序号查看正文详情"""
+"""王者荣耀热点插件 — 热点列表 + 序号/翻页命令看正文（按时间排序过滤旧文）"""
 import asyncio
 import html as html_lib
 import re
@@ -14,17 +14,22 @@ from graci import get_logger
 logger = get_logger("WZRY热点")
 
 SEARCH_URL = "https://weixin.sogou.com/weixin?type=2&query={query}"
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+UA_LIST = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
+]
 TIMEOUT = 15
 MAX_ITEMS = 10
-LIST_TTL = 1800   # 列表缓存 30 分钟
-DETAIL_TTL = 600  # 正文缓存 10 分钟
+MAX_AGE = 45 * 86400  # 只显示 45 天内的文章（时效）
+LIST_TTL = 900        # 列表缓存 15 分钟（时效优先）
+DETAIL_TTL = 600
+PAGE_SIZE = 500
 
 _cache: Dict[str, tuple] = {}
 _detail_cache: Dict[str, tuple] = {}
+_reading: Dict[str, dict] = {}  # user_id -> 当前阅读上下文
 
-# 每个命令主题 -> (回复头, 搜索关键词)
 TOPICS = {
     "hot": ("🔥 王者荣耀热点", "王者荣耀"),
     "leak": ("⚡ 王者荣耀最新爆料", "王者荣耀 爆料 更新 皮肤"),
@@ -37,14 +42,15 @@ def _strip(tag_text: str) -> str:
     return html_lib.unescape(t).strip()
 
 
-def _fetch(url: str) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://weixin.sogou.com/"})
+def _fetch(url: str, ua: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": ua, "Referer": "https://weixin.sogou.com/"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
 def _parse_list(html: str, limit: int = MAX_ITEMS) -> List[Dict]:
-    """解析搜索结果：标题 + 跳转链接"""
+    """解析搜索：标题+链接+时间，过滤超期旧文"""
+    now = time.time()
     items = []
     for m in re.finditer(r'<div class="txt-box">(.*?)</li>', html, re.S):
         seg = m.group(1)
@@ -54,92 +60,89 @@ def _parse_list(html: str, limit: int = MAX_ITEMS) -> List[Dict]:
         ts_m = re.search(r"timeConvert\('(\d+)'\)", seg)
         if not title_m:
             continue
+        ts = int(ts_m.group(1)) if ts_m else 0
+        if ts and (now - ts) > MAX_AGE:
+            continue  # 过滤旧文保证时效
         item = {
             "title": _strip(title_m.group(1)),
             "href": href_m.group(1) if href_m else "",
             "account": acct_m.group(1).strip() if acct_m else "",
-            "time": time.strftime("%m-%d %H:%M", time.localtime(int(ts_m.group(1)))) if ts_m else "",
+            "time": time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else "",
+            "ts": ts,
         }
-        if item["title"]:
+        if item["title"] and item["href"]:
             items.append(item)
         if len(items) >= limit:
             break
+    # 按时间倒序
+    items.sort(key=lambda x: x["ts"], reverse=True)
     return items
 
 
 async def _get_list(query: str) -> Optional[List[Dict]]:
-    """带缓存获取列表"""
+    """带缓存获取列表，多 UA 轮换"""
     now = time.time()
     cached = _cache.get(query)
     if cached and now - cached[0] < LIST_TTL:
         return cached[1]
-    html = await asyncio.to_thread(_fetch, SEARCH_URL.format(query=urllib.parse.quote(query)))
-    items = _parse_list(html)
+    items = None
+    for ua in UA_LIST:
+        try:
+            html = await asyncio.to_thread(_fetch, SEARCH_URL.format(query=urllib.parse.quote(query)), ua)
+            items = _parse_list(html)
+            if items:
+                break
+        except Exception:
+            continue
     if items:
         _cache[query] = (now, items)
     return items or None
 
 
 async def _get_detail(href: str) -> Optional[str]:
-    """跟随搜狗跳转抓取公众号正文（带缓存）"""
     if not href:
         return None
     now = time.time()
     cached = _detail_cache.get(href)
     if cached and now - cached[0] < DETAIL_TTL:
         return cached[1]
-    try:
-        text = await asyncio.to_thread(_fetch_detail, href)
-        if text:
-            _detail_cache[href] = (now, text)
-        return text
-    except Exception as e:
-        logger.error(f"抓取正文失败: {e}")
-        return None
+    text = None
+    for ua in UA_LIST:
+        try:
+            text = await asyncio.to_thread(_fetch_detail, href, ua)
+            if text:
+                break
+        except Exception:
+            continue
+    if text:
+        _detail_cache[href] = (now, text)
+    return text
 
 
-def _fetch_detail(href: str) -> Optional[str]:
+def _fetch_detail(href: str, ua: str) -> Optional[str]:
     """同步抓正文：跟随中间页 JS 拼接出 mp.weixin.qq.com 地址"""
     cj = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     link = "https://weixin.sogou.com" + href.replace("&amp;", "&")
-    r = opener.open(urllib.request.Request(link, headers={"User-Agent": UA}), timeout=TIMEOUT)
+    r = opener.open(urllib.request.Request(link, headers={"User-Agent": ua}), timeout=TIMEOUT)
     mid = r.read().decode("utf-8", errors="replace")
     parts = re.findall(r"url\s*\+?=\s*'([^']*)'", mid)
     final = "".join(parts)
     if not final.startswith("http"):
         return None
-    r2 = opener.open(urllib.request.Request(final, headers={"User-Agent": UA}), timeout=TIMEOUT)
+    r2 = opener.open(urllib.request.Request(final, headers={"User-Agent": ua}), timeout=TIMEOUT)
     body = r2.read().decode("utf-8", errors="replace")
     content = re.search(r'<div[^>]*id="js_content"[^>]*>(.*?)</div>\s*<script', body, re.S)
     if not content:
         return None
     text = re.sub(r"<[^>]+>", "", content.group(1))
     text = html_lib.unescape(text).strip()
-    # 去掉大量空白
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text or None
 
 
-def _pick_page(ctx, maxn: int) -> Optional[tuple]:
-    """解析 序号 [页码]：返回 (序号, 页码)"""
-    rest = (ctx.raw_text or "").strip()
-    parts = rest.split(None, 2)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        return None
-    idx = int(parts[1].strip())
-    if not (1 <= idx <= maxn):
-        return None
-    page = 1
-    if len(parts) > 2 and parts[2].strip().isdigit():
-        page = max(1, int(parts[2].strip()))
-    return (idx, page)
-
-
-PAGE_SIZE = 800
-
-
-async def _handle_topic(ctx: PluginContext, topic: str, extra: str = ""):
+async def _show_list(ctx: PluginContext, topic: str, extra: str = ""):
+    """显示列表"""
     title, query = TOPICS[topic]
     if extra:
         query += " " + extra
@@ -147,41 +150,129 @@ async def _handle_topic(ctx: PluginContext, topic: str, extra: str = ""):
     if not items:
         await ctx.reply("😢 暂时没有获取到内容，请稍后再试")
         return
-    pick = _pick_page(ctx, len(items))
-    if pick:
-        idx, page = pick
-        it = items[idx - 1]
-        text = await _get_detail(it["href"])
-        lines = [f"📄 {it['title']}", "━━━━━━━━━━━━"]
-        if text:
-            total = max(1, (len(text) + PAGE_SIZE - 1) // PAGE_SIZE)
-            page = min(page, total)
-            start = (page - 1) * PAGE_SIZE
-            lines.append(text[start:start + PAGE_SIZE])
-            lines.append("━━━━━━━━━━━━")
-            lines.append(f"📄 第 {page}/{total} 页 · 📌 {' | '.join(x for x in (it.get('account'), it.get('time')) if x)}")
-            if page < total:
-                lines.append(f"💡 继续看：{ctx.command} {idx} {page + 1}")
-        else:
-            lines.append("（正文获取失败）")
-        await ctx.reply("\n".join(lines))
-        return
+    uid = str(getattr(ctx, "sender_id", "") or "")
+    _reading[uid] = {"topic": topic, "extra": extra, "items": items, "page": 1}
     lines = [title, "━━━━━━━━━━━━"]
     for i, it in enumerate(items, 1):
         t = it['title'] if len(it['title']) <= 30 else it['title'][:30] + '…'
         lines.append(f"{i}. {t}")
     lines.append("━━━━━━━━━━━━")
-    lines.append(f"💡 回复 {ctx.command} 序号（如 1）查看正文")
+    lines.append("💡 回复序号看正文，如 1")
     await ctx.reply("\n".join(lines))
+
+
+async def _show_detail(ctx: PluginContext, idx: int, page: int):
+    """显示正文某页"""
+    uid = str(getattr(ctx, "sender_id", "") or "")
+    ctx_info = _reading.get(uid)
+    if not ctx_info:
+        await ctx.reply("请先发送热点/攻略命令获取列表，再回复序号")
+        return
+    items = ctx_info["items"]
+    if not (1 <= idx <= len(items)):
+        await ctx.reply(f"序号超出范围（1-{len(items)}）")
+        return
+    it = items[idx - 1]
+    text = await _get_detail(it["href"])
+    if not text:
+        await ctx.reply("📄 " + it["title"] + "\n（正文获取失败，可能是文章已删除）")
+        return
+    total = max(1, (len(text) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(max(page, 1), total)
+    ctx_info["idx"] = idx
+    ctx_info["page"] = page
+    ctx_info["total"] = total
+    start = (page - 1) * PAGE_SIZE
+    lines = [f"📄 {it['title']}", "━━━━━━━━━━━━"]
+    lines.append(text[start:start + PAGE_SIZE])
+    lines.append("━━━━━━━━━━━━")
+    lines.append(f"📄 {page}/{total} 页 · 📌 {' | '.join(x for x in (it.get('account'), it.get('time')) if x)}")
+    lines.append("💡 /下一页 /上一页 /尾页 /第N页")
+    await ctx.reply("\n".join(lines))
+
+
+@on_command("/下一页")
+@plugin_handler
+async def handle_next(ctx: PluginContext):
+    """翻到下一页"""
+    uid = str(getattr(ctx, "sender_id", "") or "")
+    c = _reading.get(uid)
+    if not c or not c.get("idx"):
+        await ctx.reply("请先回复序号开始阅读")
+        return
+    await _show_detail(ctx, c["idx"], c["page"] + 1)
+
+
+@on_command("/上一页")
+@plugin_handler
+async def handle_prev(ctx: PluginContext):
+    """翻到上一页"""
+    uid = str(getattr(ctx, "sender_id", "") or "")
+    c = _reading.get(uid)
+    if not c or not c.get("idx"):
+        await ctx.reply("请先回复序号开始阅读")
+        return
+    await _show_detail(ctx, c["idx"], c["page"] - 1)
+
+
+@on_command("/尾页")
+@plugin_handler
+async def handle_last(ctx: PluginContext):
+    """翻到最后一页"""
+    uid = str(getattr(ctx, "sender_id", "") or "")
+    c = _reading.get(uid)
+    if not c or not c.get("idx"):
+        await ctx.reply("请先回复序号开始阅读")
+        return
+    await _show_detail(ctx, c["idx"], c["total"])
+
+
+@on_command("/第N页", "/第n页", "/跳页", "/转页")
+@plugin_handler
+async def handle_jump(ctx: PluginContext):
+    """跳转到指定页，如 /第3页"""
+    rest = (ctx.raw_text or "").strip()
+    m = re.search(r"(\d+)", rest)
+    if not m:
+        await ctx.reply("用法：/第N页，如 /第3页")
+        return
+    uid = str(getattr(ctx, "sender_id", "") or "")
+    c = _reading.get(uid)
+    if not c or not c.get("idx"):
+        await ctx.reply("请先回复序号开始阅读")
+        return
+    await _show_detail(ctx, c["idx"], int(m.group(1)))
+
+
+async def _handle_index_cmd(ctx: PluginContext, topic: str, extra: str = ""):
+    """处理列表命令：无参数显示列表；有数字直接看对应正文"""
+    rest = (ctx.raw_text or "").strip()
+    parts = rest.split(None, 1)
+    if len(parts) > 1 and parts[1].strip().isdigit():
+        uid = str(getattr(ctx, "sender_id", "") or "")
+        # 先确保有列表上下文
+        title, query = TOPICS[topic]
+        if extra:
+            query += " " + extra
+        items = _reading.get(uid, {}).get("items") if _reading.get(uid, {}).get("topic") == topic and _reading.get(uid, {}).get("extra") == extra else None
+        if not items:
+            items = await _get_list(query)
+            if not items:
+                await ctx.reply("😢 暂时没有获取到内容，请稍后再试")
+                return
+            _reading[uid] = {"topic": topic, "extra": extra, "items": items, "page": 1}
+        await _show_detail(ctx, int(parts[1].strip()), 1)
+        return
+    await _show_list(ctx, topic, extra)
 
 
 @on_command("/王者热点", "/王者荣耀热点", "/王者资讯")
 @plugin_handler
 async def handle_wzry(ctx: PluginContext):
-    """查看王者荣耀热点（输序号看正文）"""
+    """查看王者荣耀热点"""
     await ctx.reply("🔥 正在获取王者荣耀热点...")
     try:
-        await _handle_topic(ctx, "hot")
+        await _handle_index_cmd(ctx, "hot")
     except Exception as e:
         logger.error(f"王者热点失败: {e}")
         await ctx.reply("❌ 获取失败，请稍后再试")
@@ -190,10 +281,10 @@ async def handle_wzry(ctx: PluginContext):
 @on_command("/王者爆料", "/王者荣耀爆料", "/王者更新")
 @plugin_handler
 async def handle_wzry_leak(ctx: PluginContext):
-    """查看王者荣耀爆料（输序号看正文）"""
+    """查看王者荣耀爆料"""
     await ctx.reply("⚡ 正在获取王者荣耀爆料...")
     try:
-        await _handle_topic(ctx, "leak")
+        await _handle_index_cmd(ctx, "leak")
     except Exception as e:
         logger.error(f"王者爆料失败: {e}")
         await ctx.reply("❌ 获取失败，请稍后再试")
@@ -202,13 +293,13 @@ async def handle_wzry_leak(ctx: PluginContext):
 @on_command("/王者攻略", "/王者荣耀攻略")
 @plugin_handler
 async def handle_wzry_guide(ctx: PluginContext):
-    """查看王者荣耀攻略（输序号看正文；/王者攻略 <英雄名> 定向）"""
+    """查看王者荣耀攻略"""
     rest = (ctx.raw_text or "").strip()
     parts = rest.split(None, 1)
-    hero = parts[1].strip() if len(parts) > 1 else ""
+    hero = parts[1].strip() if len(parts) > 1 and not parts[1].strip().isdigit() else ""
     await ctx.reply("📖 正在获取王者荣耀攻略...")
     try:
-        await _handle_topic(ctx, "guide", hero)
+        await _handle_index_cmd(ctx, "guide", hero)
     except Exception as e:
         logger.error(f"王者攻略失败: {e}")
         await ctx.reply("❌ 获取失败，请稍后再试")
