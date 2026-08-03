@@ -9,7 +9,7 @@ dependencies = []
 
 description = "王者荣耀热点/爆料/攻略查询，30分钟自动刷新保证时效"
 category    = "Entertainment"
-tags        = [['王者荣耀', '热点', '爆料', '攻略', '游戏']]
+tags        = ['王者荣耀', '热点', '爆料', '攻略', '游戏']
 repo        = "Vway-yw/loyan-wzry"
 docs_url    = "https://github.com/Vway-yw/loyan-wzry"
 min_framework = "0.1.0"
