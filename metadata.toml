@@ -1,19 +1,16 @@
 [plugin]
-name        = "王者荣耀热点"
-version     = "1.0.0"
-author      = "Vway-yw"
-
-priority    = 50
-icon        = "https://avatars.githubusercontent.com/u/307078813?v=4"
-dependencies = []
-
-description = "王者荣耀热点/爆料/攻略查询，30分钟自动刷新保证时效"
-category    = "Entertainment"
-tags        = ['王者荣耀', '热点', '爆料', '攻略', '游戏']
-repo        = "Vway-yw/loyan-plugins"
-docs_url    = "https://github.com/Vway-yw/loyan-plugins"
-min_framework = "0.1.0"
-
+name           = "王者荣耀热点"
+version        = "1.0.0"
+author         = "Vway-yw"
+description    = "王者荣耀热点/爆料/攻略查询，30分钟自动刷新保证时效"
+priority       = 50
+icon           = "https://avatars.githubusercontent.com/u/307078813?v=4"
+dependencies   = []
+category       = "Entertainment"
+tags           = ['王者荣耀', '热点', '爆料', '攻略', '游戏']
+repo           = "Vway-yw/loyan-plugins"
+docs_url       = "https://github.com/Vway-yw/loyan-plugins"
+min_framework  = "0.1.0"
 [handler]
 entry       = "handle_wzry"
 
